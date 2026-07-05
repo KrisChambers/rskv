@@ -1,59 +1,40 @@
-use serde::{Serialize, Deserialize};
-use std::error::Error;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream},
-};
+mod client;
+mod common;
+mod server;
+mod storage;
 
-fn get_addr() -> String {
-    "0.0.0.0:6666".to_string()
+use std::env;
+use std::error::Error;
+
+use client::run_client;
+use server::run_server;
+
+enum OperationMode {
+    Server,
+    Client,
+}
+
+fn get_mode() -> Result<OperationMode, String> {
+    let value = env::args().skip(1).take(1).collect::<Vec<String>>();
+
+    if value.is_empty() {
+        Err("No Operation Mode detected".into())
+    } else {
+        match value[0].as_str() {
+            "c" => Ok(OperationMode::Client),
+            "s" => Ok(OperationMode::Server),
+            other => Err(format!("Invalid Mode: {other}")),
+        }
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let addr = get_addr();
+    use OperationMode::*;
 
-    let listener = TcpListener::bind(&addr).await?;
-    println!("Listening at {addr}");
-
-    loop {
-        let (mut socket, _) = listener.accept().await?;
-
-        println!("Accepting connection");
-
-        tokio::spawn(async move {
-            echo(&mut socket).await.expect("Failed to echo request")
-        });
+    match get_mode() {
+        Ok(Server) => run_server().await,
+        Ok(Client) => run_client().await,
+        Err(msg) => panic!("{msg}"),
     }
-}
-
-async fn echo(socket: &mut TcpStream) -> Result<(), Box<dyn Error>>{
-    let mut buf = vec![0; 1024];
-
-    loop {
-        let n = socket.read(&mut buf).await?;
-        println!("Read {n} bytes");
-
-        if n == 0 { return Ok(()); };
-
-        socket.write_all(&buf[0..n]).await?;
-    }
-}
-
-
-
-#[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
-enum Frame {
-    Get(String),
-    Set(String, String),
-    Pub(String, String),
-    Sub(String)
-}
-
-#[test]
-fn encode_decode() {
-    use bincode::*;
-    let f = Frame::Get("name".into());
-    let x: Frame = deserialize(&serialize(&f).unwrap()).unwrap();
-
-    assert_eq!(Frame::Get("name".into()), x);
 }
