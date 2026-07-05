@@ -1,3 +1,4 @@
+use serde::{Serialize, Deserialize};
 use std::error::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream},
@@ -36,4 +37,23 @@ async fn echo(socket: &mut TcpStream) -> Result<(), Box<dyn Error>>{
 
         socket.write_all(&buf[0..n]).await?;
     }
+}
+
+
+
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
+enum Frame {
+    Get(String),
+    Set(String, String),
+    Pub(String, String),
+    Sub(String)
+}
+
+#[test]
+fn encode_decode() {
+    use bincode::*;
+    let f = Frame::Get("name".into());
+    let x: Frame = deserialize(&serialize(&f).unwrap()).unwrap();
+
+    assert_eq!(Frame::Get("name".into()), x);
 }
