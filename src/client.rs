@@ -15,18 +15,27 @@ pub async fn run_client() -> Result<(), Box<dyn Error>> {
     let stdin = io::stdin();
     let mut buffer = String::new();
     let mut response = vec![0; 1024];
+    let (mut reader, mut writer) = socket.split();
+
+    let mut is_subscribed = false;
 
     loop {
-        let _ = stdin.read_line(&mut buffer)?;
-        println!(":::: {}",buffer.trim());
+        if !is_subscribed {
+            let _ = stdin.read_line(&mut buffer)?;
+            println!(":::: {}",buffer.trim());
 
-        let frame: Frame = (&buffer).into();
+            let frame: Frame = (&buffer).into();
 
-        let ser_frame = bincode::serialize(&frame)?;
-        socket.write_all(&ser_frame).await?;
-        println!(">>>: {}", buffer.trim());
+            if let Frame::Sub(_) = frame {
+                is_subscribed = true;
+            }
 
-        let _ = socket.read(&mut response).await?;
+            let ser_frame = bincode::serialize(&frame)?;
+            writer.write_all(&ser_frame).await?;
+            println!(">>>: {}", buffer.trim());
+        }
+
+        let _ = reader.read(&mut response).await?;
         let resp = str::from_utf8(&response)?.trim();
         println!("<<<: {resp}");
         buffer = String::new();

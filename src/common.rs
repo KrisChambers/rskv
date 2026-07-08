@@ -23,6 +23,11 @@ impl From<&String> for Frame {
             "Set" => {
                 let rest = pieces.get(2).expect("Invalid Frame");
                 Frame::Set(first.trim().to_string(), rest.trim().to_string())
+            },
+            "Sub" => Frame::Sub(first.trim().to_string()),
+            "Pub" => {
+                let rest = pieces.get(2).expect("Invalid Frame");
+                Frame::Pub(first.trim().to_string(), rest.trim().to_string())
             }
             _ => todo!(),
         }

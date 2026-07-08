@@ -1,0 +1,16 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "codelldb",
+      "request": "launch",
+      "name": "Debug rskv server",
+      "program": "${workspaceFolder}/target/debug/rskv",
+      "args": ["s"],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "TOKIO_WORKER_THREADS": "1"
+      }
+    }
+  ]
+}
