@@ -5,39 +5,81 @@ use tokio::{
     net::TcpStream,
 };
 
-use crate::common::{Frame, get_addr};
+use crate::common::{Frame, KVError};
 
-pub async fn run_client() -> Result<(), Box<dyn Error>> {
-    let addr = get_addr();
-    let mut socket = TcpStream::connect(&addr).await?;
+#[derive(Eq, PartialEq)]
+pub enum ClientState {
+    Subscribed,
+    Interactive,
+    Close,
+    Closed,
+}
 
-    // We want to read in command Ex: Get "name"
-    let stdin = io::stdin();
-    let mut buffer = String::new();
-    let mut response = vec![0; 1024];
-    let (mut reader, mut writer) = socket.split();
+pub struct Client {
+    stream: TcpStream,
+    stdin: io::Stdin,
+    stdin_buffer: String,
+    stream_buffer: Vec<u8>,
+    pub state: ClientState,
+}
 
-    let mut is_subscribed = false;
+impl Client {
+    pub async fn new(addr: &str) -> Result<Self, Box<dyn Error>> {
+        Ok(Client {
+            stream: TcpStream::connect(addr).await?,
+            stdin: io::stdin(), // Recommended to not use this for interactive stuff.
+            stdin_buffer: String::new(),
+            stream_buffer: vec![0; 1024],
+            state: ClientState::Interactive,
+        })
+    }
 
-    loop {
-        if !is_subscribed {
-            let _ = stdin.read_line(&mut buffer)?;
-            println!(":::: {}",buffer.trim());
+    pub async fn poll(&mut self) -> KVError<()> {
+        match self.state {
+            ClientState::Interactive => {
+                let frame = self.read_frame()?;
 
-            let frame: Frame = (&buffer).into();
+                if let Frame::Sub(_) = frame {
+                    self.state = ClientState::Subscribed;
+                }
 
-            if let Frame::Sub(_) = frame {
-                is_subscribed = true;
+                println!(">>>: {frame:?}");
+                self.send_frame(frame).await?;
+
+                self.read_response().await?;
+
+                Ok(())
             }
-
-            let ser_frame = bincode::serialize(&frame)?;
-            writer.write_all(&ser_frame).await?;
-            println!(">>>: {}", buffer.trim());
+            ClientState::Subscribed => {
+                self.read_response().await?;
+                Ok(())
+            }
+            ClientState::Close => todo!(),
+            ClientState::Closed => todo!(),
         }
+    }
 
-        let _ = reader.read(&mut response).await?;
-        let resp = str::from_utf8(&response)?.trim();
+    fn read_frame(&mut self) -> KVError<Frame> {
+        self.stdin.read_line(&mut self.stdin_buffer)?;
+
+        let frame: Frame = (&self.stdin_buffer).into();
+
+        self.stdin_buffer = String::new();
+
+        Ok(frame)
+    }
+
+    async fn send_frame(&mut self, frame: Frame) -> KVError<()> {
+        let msg = bincode::serialize(&frame)?;
+        self.stream.write_all(&msg).await?;
+
+        Ok(())
+    }
+
+    async fn read_response(&mut self) -> KVError<&str> {
+        let _ = self.stream.read(&mut self.stream_buffer).await?;
+        let resp = str::from_utf8(&self.stream_buffer)?;
         println!("<<<: {resp}");
-        buffer = String::new();
+        Ok(str::from_utf8(&self.stream_buffer)?.trim())
     }
 }

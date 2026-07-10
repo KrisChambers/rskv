@@ -1,8 +1,8 @@
-use crate::common::{Frame, get_addr};
+use crate::common::{Frame, KVError};
 use std::collections::HashMap;
-use std::error::Error;
 use std::sync::Arc;
-use tokio::sync::mpsc::{Receiver, Sender, channel};
+use tokio::sync::mpsc::{Sender, channel};
+use tokio::task::JoinHandle;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
@@ -12,28 +12,65 @@ use tokio::{
 type Storage = Arc<RwLock<HashMap<String, String>>>;
 type ChannelMap = Arc<RwLock<HashMap<String, Sender<String>>>>;
 
-pub async fn run_server() -> Result<(), Box<dyn Error>> {
-    let addr = get_addr();
+#[derive(Eq, PartialEq)]
+pub enum ServerState {
+    Active,
+}
 
-    let listener = TcpListener::bind(&addr).await?;
-    println!("Listening at {addr}");
+pub struct Server {
+    listener: TcpListener,
+    store: Storage,
+    channel_map: ChannelMap,
+    connections: Vec<Connection>,
+    pub state: ServerState,
+}
 
-    let store = Arc::new(RwLock::new(HashMap::new()));
-    let channels: ChannelMap = Arc::new(RwLock::new(HashMap::new()));
+impl Server {
+    pub async fn new(addr: &str) -> KVError<Self> {
+        Ok(Self {
+            listener: TcpListener::bind(addr).await?,
+            store: Arc::new(RwLock::new(HashMap::new())),
+            channel_map: Arc::new(RwLock::new(HashMap::new())),
+            connections: vec![],
+            state: ServerState::Active,
+        })
+    }
 
-    loop {
-        let (stream, _) = listener.accept().await?;
+    pub async fn poll(&mut self) -> KVError<()> {
+        let (stream, _) = self.listener.accept().await?;
+        println!("Connection accepted");
 
-        println!("Accepted connection");
+        let con_store = self.store.clone();
+        let con_channels = self.channel_map.clone();
 
-        let store_instance = store.clone();
-        let channel_instance = channels.clone();
+        self.connections.push(
+         Connection::new(stream, con_store, con_channels)
+        );
 
-        tokio::spawn(async move {
-            process(stream, store_instance, channel_instance)
-                .await
-                .unwrap()
-        });
+        Ok(())
+    }
+
+}
+
+enum ConnectionState {
+    Connected,
+    Disconnected,
+}
+
+struct Connection {
+    state: ConnectionState,
+    handle: JoinHandle<()>
+}
+
+impl Connection {
+    pub fn new(stream: TcpStream, storage: Storage, channels: ChannelMap) -> Self {
+        let handle =
+            tokio::spawn(async move { process(stream, storage, channels).await.unwrap() });
+
+        Self {
+            state: ConnectionState::Connected,
+            handle
+        }
     }
 }
 
@@ -41,7 +78,7 @@ async fn process(
     stream: TcpStream,
     storage: Storage,
     channels: ChannelMap,
-) -> Result<(), Box<dyn Error>> {
+) -> KVError<()> {
     let (reader, writer) = stream.into_split();
     let mut buf_reader = BufReader::new(reader);
     let mut buffer = vec![0; 1024];
@@ -86,11 +123,7 @@ async fn process(
 
                 channel.send(msg).await?;
 
-                writer
-                    .write()
-                    .await
-                    .write_all("Sent".as_bytes())
-                    .await?
+                writer.write().await.write_all("Sent".as_bytes()).await?
             }
             Frame::Sub(name) => {
                 let spawn_name = name.clone();
@@ -123,7 +156,6 @@ async fn process(
                         }
                     });
                 }
-
             }
         }
     }

@@ -6,8 +6,12 @@ mod storage;
 use std::env;
 use std::error::Error;
 
-use client::run_client;
-use server::run_server;
+use client::{Client};
+use server::{Server};
+
+use crate::{client::ClientState, server::ServerState};
+
+const SERVER_ADDR: &str = "0.0.0.0:6666";
 
 enum OperationMode {
     Server,
@@ -30,11 +34,25 @@ fn get_mode() -> Result<OperationMode, String> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    use OperationMode::*;
-
     match get_mode() {
-        Ok(Server) => run_server().await,
-        Ok(Client) => run_client().await,
+        Ok(OperationMode::Server) => {
+            let mut server = Server::new(SERVER_ADDR).await?;
+
+            while server.state == ServerState::Active {
+                server.poll().await?;
+            }
+
+            Ok(())
+        },
+        Ok(OperationMode::Client) => {
+            let mut client = Client::new(SERVER_ADDR).await?;
+
+            while client.state != ClientState::Closed {
+                client.poll().await?;
+            }
+
+            Ok(())
+        },
         Err(msg) => panic!("{msg}"),
     }
 }
