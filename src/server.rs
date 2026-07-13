@@ -1,4 +1,4 @@
-use crate::common::{Frame, KVError};
+use crate::common::{Frame, FrameType, KVError};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Sender, channel};
@@ -81,61 +81,68 @@ async fn process(
 ) -> KVError<()> {
     let (reader, writer) = stream.into_split();
     let mut buf_reader = BufReader::new(reader);
-    let mut buffer = vec![0; 1024];
+    let mut buffer = String::new();
 
     let writer = Arc::new(RwLock::new(writer));
 
     loop {
-        let n = buf_reader.read(&mut buffer).await?;
+        let n = buf_reader.read_to_string(&mut buffer).await?;
         println!(":::: Read {n} bytes");
 
         if n == 0 {
             return Ok(());
         };
 
-        let frame: Frame = bincode::deserialize(&buffer).unwrap();
+        let frame: Frame = Frame::deserialize(&buffer);
         println!("<<<: {frame:?}");
+        let key = frame.key;
 
-        match frame {
-            Frame::Get(name) => {
+        match frame.command {
+            FrameType::Get => {
                 let store = storage.read().await;
 
-                let value = store.get(&name).ok_or(format!("Invalid key {name}"))?;
+                let value = store.get(key).ok_or(format!("Invalid key {key}"))?;
                 writer.write().await.write_all(value.as_bytes()).await?;
-            }
-            Frame::Set(name, value) => {
+            },
+            FrameType::Set => {
                 let mut store = storage.write().await;
-                let _ = store.insert(name.clone(), value.clone());
+                if let Some(value) = frame.value {
+                    let _ = store.insert(frame.key.to_string(), value.to_string());
+                    writer
+                        .write()
+                        .await
+                        .write_all(format!("{key} -> {value}").as_bytes())
+                        .await?
+                } else {
+                    panic!("Set command without value");
+                }
 
-                writer
-                    .write()
-                    .await
-                    .write_all(format!("{name} -> {value}").as_bytes())
-                    .await?
             }
-            Frame::Pub(name, msg) => {
+            FrameType::Pub => {
                 let channel_store = channels.read().await;
 
-                let channel = channel_store
-                    .get(&name)
-                    .ok_or(format!("no channel for '{name}'"))?;
-                println!("<< {name} << {msg}");
+                if let Some(value) = frame.value {
+                    let channel = channel_store
+                        .get(key)
+                        .ok_or(format!("no channel for '{key}'"))?;
+                    println!("<< {key} << {value}");
 
-                channel.send(msg).await?;
+                    channel.send(value.to_string()).await?;
 
-                writer.write().await.write_all("Sent".as_bytes()).await?
+                    writer.write().await.write_all("Sent".as_bytes()).await?
+                }
             }
-            Frame::Sub(name) => {
-                let spawn_name = name.clone();
+            FrameType::Sub => {
                 let spawn_writer = writer.clone();
-                println!("::: Added Channel for {name}");
+                println!("::: Added Channel for {key}");
 
                 let mut channel_map = channels.write().await;
 
-                if !channel_map.contains_key(&name) {
+                if !channel_map.contains_key(key) {
                     let (sender, mut receiver) = channel::<String>(100);
+                    let spawn_key = key.to_string(); // We need to create an owned version here.
 
-                    channel_map.insert(name.trim().to_string(), sender);
+                    channel_map.insert(spawn_key.trim().to_string(), sender);
 
                     tokio::spawn(async move {
                         loop {
@@ -145,11 +152,11 @@ async fn process(
                                 spawn_writer
                                     .write()
                                     .await
-                                    .write_all(format!("{spawn_name} -> {msg}").as_bytes())
+                                    .write_all(format!("{spawn_key} -> {msg}").as_bytes())
                                     .await
                                     .unwrap();
 
-                                println!("::: Sent message on {spawn_name}");
+                                println!("::: Sent message on {spawn_key}");
                             } else {
                                 println!("Sender has been dropped")
                             }

@@ -5,7 +5,7 @@ use tokio::{
     net::TcpStream,
 };
 
-use crate::common::{Frame, KVError};
+use crate::common::{Frame, FrameType, KVError};
 
 #[derive(Eq, PartialEq)]
 pub enum ClientState {
@@ -38,15 +38,16 @@ impl Client {
         match self.state {
             ClientState::Interactive => {
                 let frame = self.read_frame()?;
+                let command = frame.command.clone();
+                let msg = frame.serialize();
 
-                if let Frame::Sub(_) = frame {
+                if command == FrameType::Sub {
                     self.state = ClientState::Subscribed;
                 }
 
-                println!(">>>: {frame:?}");
-                self.send_frame(frame).await?;
-
+                self.stream.write_all(msg.as_bytes()).await?;
                 self.read_response().await?;
+                self.stdin_buffer.clear();
 
                 Ok(())
             }
@@ -59,21 +60,12 @@ impl Client {
         }
     }
 
-    fn read_frame(&mut self) -> KVError<Frame> {
+    fn read_frame<'a>(&'a mut self) -> KVError<Frame<'a>> {
         self.stdin.read_line(&mut self.stdin_buffer)?;
 
-        let frame: Frame = (&self.stdin_buffer).into();
-
-        self.stdin_buffer = String::new();
+        let frame: Frame = Frame::deserialize(&self.stdin_buffer);
 
         Ok(frame)
-    }
-
-    async fn send_frame(&mut self, frame: Frame) -> KVError<()> {
-        let msg = bincode::serialize(&frame)?;
-        self.stream.write_all(&msg).await?;
-
-        Ok(())
     }
 
     async fn read_response(&mut self) -> KVError<&str> {
