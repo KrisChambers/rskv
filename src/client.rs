@@ -46,6 +46,7 @@ impl Client {
                 }
 
                 self.stream.write_all(msg.as_bytes()).await?;
+                println!("Getting response");
                 self.read_response().await?;
                 self.stdin_buffer.clear();
 
