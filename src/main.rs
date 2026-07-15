@@ -6,10 +6,8 @@ mod storage;
 use std::env;
 use std::error::Error;
 
-use client::{Client};
-use server::{Server};
-
-use crate::{client::ClientState, server::ServerState};
+use client::{Client, ClientState};
+use server::{Server, ServerState};
 
 const SERVER_ADDR: &str = "0.0.0.0:6666";
 
