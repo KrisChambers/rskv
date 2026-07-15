@@ -6,11 +6,13 @@ use tokio::task::JoinHandle;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
-    sync::RwLock,
+    //sync::RwLock,
 };
 
-type Storage = Arc<RwLock<HashMap<String, String>>>;
-type ChannelMap = Arc<RwLock<HashMap<String, Sender<String>>>>;
+use crate::rwlock::RWLock;
+
+type Storage = Arc<RWLock<HashMap<String, String>>>;
+type ChannelMap = Arc<RWLock<HashMap<String, Sender<String>>>>;
 
 #[derive(Eq, PartialEq)]
 pub enum ServerState {
@@ -29,8 +31,8 @@ impl Server {
     pub async fn new(addr: &str) -> KVError<Self> {
         Ok(Self {
             listener: TcpListener::bind(addr).await?,
-            store: Arc::new(RwLock::new(HashMap::new())),
-            channel_map: Arc::new(RwLock::new(HashMap::new())),
+            store: Arc::new(RWLock::new(HashMap::new())),
+            channel_map: Arc::new(RWLock::new(HashMap::new())),
             connections: vec![],
             state: ServerState::Active,
         })
@@ -83,7 +85,7 @@ async fn process(
     let mut buf_reader = BufReader::new(reader);
     let mut buffer = String::new();
 
-    let writer = Arc::new(RwLock::new(writer));
+    let writer = Arc::new(RWLock::new(writer));
 
     loop {
         let n = buf_reader.read_to_string(&mut buffer).await?;
@@ -99,18 +101,17 @@ async fn process(
 
         match frame.command {
             FrameType::Get => {
-                let store = storage.read().await;
+                let store = storage.read();//.await;
 
                 let value = store.get(key).ok_or(format!("Invalid key {key}"))?;
-                writer.write().await.write_all(value.as_bytes()).await?;
+                writer.write().write_all(value.as_bytes()).await?;
             },
             FrameType::Set => {
-                let mut store = storage.write().await;
+                let mut store = storage.write();//.await;
                 if let Some(value) = frame.value {
                     let _ = store.insert(frame.key.to_string(), value.to_string());
                     writer
                         .write()
-                        .await
                         .write_all(format!("{key} -> {value}").as_bytes())
                         .await?
                 } else {
@@ -119,7 +120,7 @@ async fn process(
 
             }
             FrameType::Pub => {
-                let channel_store = channels.read().await;
+                let channel_store = channels.read();//.await;
 
                 if let Some(value) = frame.value {
                     let channel = channel_store
@@ -129,14 +130,14 @@ async fn process(
 
                     channel.send(value.to_string()).await?;
 
-                    writer.write().await.write_all("Sent".as_bytes()).await?
+                    writer.write().write_all("Sent".as_bytes()).await?
                 }
             }
             FrameType::Sub => {
                 let spawn_writer = writer.clone();
                 println!("::: Added Channel for {key}");
 
-                let mut channel_map = channels.write().await;
+                let mut channel_map = channels.write();//.await;
 
                 if !channel_map.contains_key(key) {
                     let (sender, mut receiver) = channel::<String>(100);
@@ -151,7 +152,6 @@ async fn process(
                                 println!("<<< {msg}");
                                 spawn_writer
                                     .write()
-                                    .await
                                     .write_all(format!("{spawn_key} -> {msg}").as_bytes())
                                     .await
                                     .unwrap();

@@ -2,6 +2,8 @@ mod client;
 mod common;
 mod server;
 mod storage;
+mod rwlock;
+mod sync;
 
 use std::env;
 use std::error::Error;
