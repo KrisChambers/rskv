@@ -1,18 +1,18 @@
 use crate::common::{Frame, FrameType, KVError};
 use std::collections::HashMap;
-use std::sync::Arc;
+use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc::{Sender, channel};
 use tokio::task::JoinHandle;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
-    //sync::RwLock,
+    sync::RwLock,
 };
 
-use crate::sync::RWLock;
+use crate::sync::{Arc};
 
-type Storage = Arc<RWLock<HashMap<String, String>>>;
-type ChannelMap = Arc<RWLock<HashMap<String, Sender<String>>>>;
+type Storage = Arc<RwLock<HashMap<String, String>>>;
+type ChannelMap = Arc<RwLock<HashMap<String, Sender<String>>>>;
 
 #[derive(Eq, PartialEq)]
 pub enum ServerState {
@@ -31,8 +31,8 @@ impl Server {
     pub async fn new(addr: &str) -> KVError<Self> {
         Ok(Self {
             listener: TcpListener::bind(addr).await?,
-            store: Arc::new(RWLock::new(HashMap::new())),
-            channel_map: Arc::new(RWLock::new(HashMap::new())),
+            store: Arc::new(RwLock::new(HashMap::new())),
+            channel_map: Arc::new(RwLock::new(HashMap::new())),
             connections: vec![],
             state: ServerState::Active,
         })
@@ -45,13 +45,11 @@ impl Server {
         let con_store = self.store.clone();
         let con_channels = self.channel_map.clone();
 
-        self.connections.push(
-         Connection::new(stream, con_store, con_channels)
-        );
+        self.connections
+            .push(Connection::new(stream, con_store, con_channels));
 
         Ok(())
     }
-
 }
 
 enum ConnectionState {
@@ -61,34 +59,29 @@ enum ConnectionState {
 
 struct Connection {
     state: ConnectionState,
-    handle: JoinHandle<()>
+    handle: JoinHandle<()>,
 }
 
 impl Connection {
     pub fn new(stream: TcpStream, storage: Storage, channels: ChannelMap) -> Self {
-        let handle =
-            tokio::spawn(async move { process(stream, storage, channels).await.unwrap() });
+        let handle = tokio::spawn(async move { process(stream, storage, channels).await.unwrap() });
 
         Self {
             state: ConnectionState::Connected,
-            handle
+            handle,
         }
     }
 }
 
-async fn process(
-    stream: TcpStream,
-    storage: Storage,
-    channels: ChannelMap,
-) -> KVError<()> {
+async fn process(stream: TcpStream, storage: Storage, channels: ChannelMap) -> KVError<()> {
     let (reader, writer) = stream.into_split();
     let mut buf_reader = BufReader::new(reader);
     let mut buffer = String::new();
 
-    let writer = Arc::new(RWLock::new(writer));
+    let writer = Arc::new(RwLock::new(writer));
 
     loop {
-        let n = buf_reader.read_to_string(&mut buffer).await?;
+        let n = buf_reader.read_line(&mut buffer).await?;
         println!(":::: Read {n} bytes");
 
         if n == 0 {
@@ -101,26 +94,25 @@ async fn process(
 
         match frame.command {
             FrameType::Get => {
-                let store = storage.read();//.await;
+                let store = storage.read().await;
 
                 let value = store.get(key).ok_or(format!("Invalid key {key}"))?;
-                writer.write().write_all(value.as_bytes()).await?;
-            },
+                writer.write().await.write_all(value.as_bytes()).await?;
+            }
             FrameType::Set => {
-                let mut store = storage.write();//.await;
+                let mut store = storage.write().await;
                 if let Some(value) = frame.value {
                     let _ = store.insert(frame.key.to_string(), value.to_string());
                     writer
-                        .write()
+                        .write().await
                         .write_all(format!("{key} -> {value}").as_bytes())
                         .await?
                 } else {
                     panic!("Set command without value");
                 }
-
             }
             FrameType::Pub => {
-                let channel_store = channels.read();//.await;
+                let channel_store = channels.read().await;
 
                 if let Some(value) = frame.value {
                     let channel = channel_store
@@ -130,14 +122,14 @@ async fn process(
 
                     channel.send(value.to_string()).await?;
 
-                    writer.write().write_all("Sent".as_bytes()).await?
+                    writer.write().await.write_all("Sent".as_bytes()).await?
                 }
             }
             FrameType::Sub => {
                 let spawn_writer = writer.clone();
                 println!("::: Added Channel for {key}");
 
-                let mut channel_map = channels.write();//.await;
+                let mut channel_map = channels.write().await;
 
                 if !channel_map.contains_key(key) {
                     let (sender, mut receiver) = channel::<String>(100);
@@ -151,7 +143,7 @@ async fn process(
                             if let Some(msg) = receiver.recv().await {
                                 println!("<<< {msg}");
                                 spawn_writer
-                                    .write()
+                                    .write().await
                                     .write_all(format!("{spawn_key} -> {msg}").as_bytes())
                                     .await
                                     .unwrap();

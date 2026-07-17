@@ -1,10 +1,12 @@
-use std::{hint::{self, spin_loop}, ops::{Deref, DerefMut}, sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed}}, thread, time::Duration};
 use std::cell::UnsafeCell;
-
-
+use std::{
+    hint::{self},
+    ops::{Deref, DerefMut},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed},
+};
 
 // How do we think about Send + Sync traits?
-pub struct RWLock<T> {
+pub struct RwLock<T> {
     // The value
     // We are building a container for doing interior immutability
     // Using an UnsafeCell here lets us opt out of Rust's checks
@@ -14,36 +16,40 @@ pub struct RWLock<T> {
     writing: AtomicBool, // Binary semaphore for deciding when we can write.
 
     // Count of readers currently active?
-    readers: AtomicUsize
+    readers: AtomicUsize,
 }
 
 // Something can safely be Send unless it shares mutable state with something else WITHOUT enforcing
 // exclusive access. - The whole point here is that we are enforcing exclusive access to the writer
 // thread.
-unsafe impl<T> Send for RWLock<T> where T: Send {}
+unsafe impl<T> Send for RwLock<T> where T: Send {}
 
 // Something can safely be Sync if it is enforced that you can't write to the object reference while it could
 // be read or written to from another reference.
 // This is enforced by the aquisition of the RWLock's read method
-unsafe impl<T> Sync for RWLock<T> where T: Sync {}
+unsafe impl<T> Sync for RwLock<T> where T: Sync {}
 
 pub struct ReadGuard<'a, T> {
     value: &'a T, // This needs something else...
-    counter: &'a AtomicUsize
+    counter: &'a AtomicUsize,
 }
 
 pub struct WriteGuard<'a, T> {
     value: &'a mut T,
-    flag: &'a AtomicBool
+    flag: &'a AtomicBool,
 }
 
-impl<T> RWLock<T> {
+impl<T> RwLock<T> {
     /// Create a new read-write lock for a value
     pub fn new(value: T) -> Self {
         let writing = AtomicBool::from(false);
         let readers = AtomicUsize::from(0);
 
-        RWLock{ value: UnsafeCell::new(value), writing, readers }
+        RwLock {
+            value: UnsafeCell::new(value),
+            writing,
+            readers,
+        }
     }
 
     /// Get a read lock
@@ -54,15 +60,21 @@ impl<T> RWLock<T> {
 
         self.readers.fetch_add(1, Relaxed);
 
-        let ptr = unsafe { self.value.get().as_ref_unchecked()};
-        ReadGuard { value: ptr, counter: &self.readers}
+        let ptr = unsafe { self.value.get().as_ref_unchecked() };
+        ReadGuard {
+            value: ptr,
+            counter: &self.readers,
+        }
     }
 
     /// Get a write lock
     pub fn write(&self) -> WriteGuard<'_, T> {
         // If we don't already have a writer
         loop {
-            match self.writing.compare_exchange_weak(false, true, Relaxed, Relaxed) {
+            match self
+                .writing
+                .compare_exchange_weak(false, true, Relaxed, Relaxed)
+            {
                 Ok(_) => break,
                 Err(_) => continue,
             }
@@ -74,7 +86,10 @@ impl<T> RWLock<T> {
         }
 
         let ptr = unsafe { self.value.get().as_mut_unchecked() };
-        WriteGuard { value: ptr, flag: &self.writing }
+        WriteGuard {
+            value: ptr,
+            flag: &self.writing,
+        }
     }
 
     /// Try to obtain a read lock
@@ -90,8 +105,7 @@ impl<T> RWLock<T> {
     }
 }
 
-impl <'a, T> Deref for ReadGuard<'a, T>
-{
+impl<'a, T> Deref for ReadGuard<'a, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -99,7 +113,7 @@ impl <'a, T> Deref for ReadGuard<'a, T>
     }
 }
 
-impl <'a, T> Deref for WriteGuard<'a, T> {
+impl<'a, T> Deref for WriteGuard<'a, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -107,21 +121,21 @@ impl <'a, T> Deref for WriteGuard<'a, T> {
     }
 }
 
-impl <'a, T> DerefMut for WriteGuard<'a, T> {
+impl<'a, T> DerefMut for WriteGuard<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.value
     }
 }
 
-impl <'a, T> Drop for WriteGuard<'a, T> {
+impl<'a, T> Drop for WriteGuard<'a, T> {
     fn drop(&mut self) {
         // SAFETY: `self` is pinned till after dropped.
         // unsafe { Drop::pin_drop(std::pin::Pin::new_unchecked(self)) }
-        self.flag.store( false, Relaxed);
+        self.flag.store(false, Relaxed);
     }
 }
 
-impl <'a, T> Drop for ReadGuard<'a, T> {
+impl<'a, T> Drop for ReadGuard<'a, T> {
     fn drop(&mut self) {
         // SAFETY: `self` is pinned till after dropped.
         // unsafe { Drop::pin_drop(std::pin::Pin::new_unchecked(self)) }
@@ -129,83 +143,88 @@ impl <'a, T> Drop for ReadGuard<'a, T> {
     }
 }
 
-#[test]
-fn multiple_writer_block() {
-    // Need to find a better way to do this.
-    let rwlock = Arc::new(RWLock::new(1));
-    let rw1 = rwlock.clone();
-    let t1 = thread::spawn(move || {
-        assert!(!rw1.writing.load(Relaxed));
-        let mut item = rw1.write();
-        assert!(rw1.writing.load(Relaxed) && item.flag.load(Relaxed));
-        thread::sleep(Duration::from_millis(100));
+#[cfg(test)]
+mod test {
+    use std::{hint::spin_loop, sync::Arc, thread, time::Duration};
+    use super::*;
 
-        *item += 1;
-    });
+    #[test]
+    fn multiple_writer_block() {
+        // Need to find a better way to do this.
+        let rwlock = Arc::new(RwLock::new(1));
+        let rw1 = rwlock.clone();
+        let t1 = thread::spawn(move || {
+            assert!(!rw1.writing.load(Relaxed));
+            let mut item = rw1.write();
+            assert!(rw1.writing.load(Relaxed) && item.flag.load(Relaxed));
+            thread::sleep(Duration::from_millis(100));
 
-    // This SHOULD aquire a write lock after the first thread.
-    let rw2 = rwlock.clone();
-    let t2 = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(50));
-        // Bit of a race condition here but this is what we want.
-        assert!(rw2.writing.load(Relaxed));
-        let mut item = rw2.write();
-        assert!(item.flag.load(Relaxed));
-        *item *= 2;
-    });
+            *item += 1;
+        });
 
-    t1.join().unwrap();
-    t2.join().unwrap();
+        // This SHOULD aquire a write lock after the first thread.
+        let rw2 = rwlock.clone();
+        let t2 = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            // Bit of a race condition here but this is what we want.
+            assert!(rw2.writing.load(Relaxed));
+            let mut item = rw2.write();
+            assert!(item.flag.load(Relaxed));
+            *item *= 2;
+        });
 
-    let value = *rwlock.read();
+        t1.join().unwrap();
+        t2.join().unwrap();
 
-    assert_eq!(value, 4);
-}
+        let value = *rwlock.read();
 
-#[test]
-fn multiple_writers_blocking() {
-    // This is an attempt to test some blocking action.
-    let mut handles = vec![];
-    let trigger = Arc::new(RWLock::new(false));
-    let values : Arc<RWLock<Vec<usize>>> = Arc::new(RWLock::new(vec![]));
-    for i in 0..20 {
-        let t = trigger.clone();
+        assert_eq!(value, 4);
+    }
+
+    #[test]
+    fn multiple_writers_blocking() {
+        // This is an attempt to test some blocking action.
+        let mut handles = vec![];
+        let trigger = Arc::new(RwLock::new(false));
+        let values: Arc<RwLock<Vec<usize>>> = Arc::new(RwLock::new(vec![]));
+        for i in 0..20 {
+            let t = trigger.clone();
+            let v = values.clone();
+            let h = thread::spawn(move || {
+                // Should let us wait for everything to be created
+                while !(t.read().value) {
+                    spin_loop();
+                }
+
+                v.write().push(i);
+            });
+
+            handles.push(h);
+        }
+
         let v = values.clone();
-        let h = thread::spawn(move || {
-            // Should let us wait for everything to be created
+        let t = trigger.clone();
+        let whandle = thread::spawn(move || {
             while !(t.read().value) {
                 spin_loop();
             }
 
-            v.write().push(i);
+            v.write().push(100);
         });
 
-        handles.push(h);
-    }
+        handles.push(whandle);
 
-    let v = values.clone();
-    let t = trigger.clone();
-    let whandle = thread::spawn(move || {
-        while !(t.read().value) {
-            spin_loop();
+        {
+            let mut x = trigger.write();
+            *x = true;
         }
 
-        v.write().push(100);
-    });
+        for handle in handles {
+            handle.join().unwrap();
+        }
 
-    handles.push(whandle);
-
-    {
-        let mut x = trigger.write();
-        *x = true;
+        let v = values.read().value;
+        assert_eq!(values.read().len(), 21);
+        assert!(v.contains(&100));
     }
-
-    for handle in handles {
-        handle.join().unwrap();
-    }
-
-    let v = values.read().value;
-    assert_eq!(values.read().len(), 21);
-    assert!(v.contains(&100));
-
 }

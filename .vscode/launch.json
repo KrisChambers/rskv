@@ -11,6 +11,16 @@
       "env": {
         "TOKIO_WORKER_THREADS": "1"
       }
+    },{
+      "type": "codelldb",
+      "request": "launch",
+      "name": "Debug rskv client",
+      "program": "${workspaceFolder}/target/debug/rskv",
+      "args": ["c"],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "TOKIO_WORKER_THREADS": "1"
+      }
     }
   ]
 }

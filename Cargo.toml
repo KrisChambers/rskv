@@ -5,3 +5,6 @@ edition = "2024"
 
 [dependencies]
 tokio = { version = "1.52.3", features = ["full"] }
+
+[build]
+rustflags = ["-A", "warning"]
