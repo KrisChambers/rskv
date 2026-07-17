@@ -9,7 +9,7 @@ use tokio::{
     //sync::RwLock,
 };
 
-use crate::rwlock::RWLock;
+use crate::sync::RWLock;
 
 type Storage = Arc<RWLock<HashMap<String, String>>>;
 type ChannelMap = Arc<RWLock<HashMap<String, Sender<String>>>>;
