@@ -6,69 +6,63 @@ use std::{
 };
 
 struct ArcData<T> {
-    ptr: NonNull<T>,
-    count: NonNull<AtomicUsize>,
+    value: T,
+    count: AtomicUsize,
 }
 
+/// The inner data of an Arc that will be stored together on the heap
 impl<T> ArcData<T> {
     pub fn new(value: T) -> Self {
-        let ptr = NonNull::new(Box::into_raw(Box::new(value))).unwrap();
-        let count = NonNull::new(Box::into_raw(Box::new(AtomicUsize::new(1)))).unwrap();
+        let count = AtomicUsize::new(1);
 
-        Self { ptr, count }
-    }
-
-    fn get_count(&self) -> &AtomicUsize {
-        unsafe { self.count.as_ref() }
-    }
-
-    fn get_value(&self) -> &T {
-        unsafe { self.ptr.as_ref() }
-    }
-
-    fn inc(&self) {
-        unsafe { self.get_count().fetch_add(1, Relaxed) };
-    }
-
-    fn dec(&self) {
-        unsafe { self.get_count().fetch_sub(1, Relaxed) };
+        Self { value, count }
     }
 }
 
-impl<T> Clone for ArcData<T> {
-    fn clone(&self) -> Self {
-        self.inc();
-
-        Self {
-            ptr: self.ptr,
-            count: self.count,
-        }
-    }
+/// A custom Arc implementation using pointers.
+pub struct Arc<T> {
+    data: NonNull<ArcData<T>>,
 }
 
-impl<T> Drop for ArcData<T> {
+impl <T> Drop for Arc<T> {
     fn drop(&mut self) {
         // SAFETY: `self` is pinned till after dropped.
-        // unsafe { Drop::pin_drop(std::pin::Pin::new_unchecked(self)) }
+        //unsafe { Drop::pin_drop(std::pin::Pin::new_unchecked(self)) }
 
         self.dec();
 
-        if self.get_count().load(Relaxed) == 0 {
-            unsafe { drop_in_place(self.ptr.as_ptr()) };
-            unsafe { drop_in_place(self.count.as_ptr()) };
+        if self.get_count() == 0 {
+            unsafe { drop_in_place(self.data.as_ptr()) };
         }
     }
-}
-
-pub struct Arc<T> {
-    data: ArcData<T>,
 }
 
 impl<T> Arc<T> {
     pub fn new(value: T) -> Self {
+        let inner = Box::new(ArcData::new(value));
+        let data = NonNull::new(Box::into_raw(inner)).unwrap();
         Self {
-            data: ArcData::new(value),
+            data,
         }
+    }
+
+    fn get_data(&self) -> &ArcData<T> {
+        unsafe { self.data.as_ref() }
+    }
+
+    fn inc(&self) {
+        let data = self.get_data();
+        data.count.fetch_add(1, Relaxed);
+    }
+
+    fn dec(&self) {
+        let data = self.get_data();
+        data.count.fetch_sub(1, Relaxed);
+    }
+
+    fn get_count(&self) -> usize {
+        let data = self.get_data();
+        data.count.load(Relaxed)
     }
 }
 
@@ -76,15 +70,15 @@ impl<T> Deref for Arc<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        unsafe { self.data.ptr.as_ref() }
+        unsafe { &self.data.as_ref().value }
     }
 }
 
 impl<T> Clone for Arc<T> {
     fn clone(&self) -> Self {
-        let data = self.data.clone();
+        self.inc();
 
-        Self { data }
+        Self { data: self.data }
     }
 }
 
@@ -120,9 +114,9 @@ mod test {
         }
 
         // There should be 10 references
-        assert_eq!(og.data.get_count().load(Relaxed), 10);
+        assert_eq!(og.get_count(), 10);
 
-        let thing_addr = og.data.ptr.as_ptr() as usize;
+        let thing_addr = og.data.as_ptr() as usize;
 
         // They should all
         for clone in clones.iter() {
@@ -131,19 +125,19 @@ mod test {
 
             // Have the same reference count
             assert_eq!(
-                clone.data.get_count().load(Relaxed),
-                og.data.get_count().load(Relaxed)
+                clone.get_count(),
+                og.get_count()
             );
 
             // Point to the same data as the original
-            assert_eq!(thing_addr - clone.data.ptr.as_ptr() as usize, 0);
+            assert_eq!(thing_addr - clone.data.as_ptr() as usize, 0);
         }
 
         while let Some(clone) = clones.pop() {
             drop(clone);
-            assert_eq!(og.data.get_count().load(Relaxed), clones.len() + 1);
+            assert_eq!(og.get_count(), clones.len() + 1);
         }
 
-        assert_eq!(og.data.get_count().load(Relaxed), 1);
+        assert_eq!(og.get_count(), 1);
     }
 }

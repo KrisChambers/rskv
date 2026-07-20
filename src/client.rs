@@ -64,7 +64,7 @@ impl Client {
     fn read_frame<'a>(&'a mut self) -> KVError<Frame<'a>> {
         self.stdin.read_line(&mut self.stdin_buffer)?;
 
-        let frame: Frame = Frame::deserialize(&self.stdin_buffer);
+        let frame: Frame = Frame::deserialize(self.stdin_buffer.trim());
 
         Ok(frame)
     }
