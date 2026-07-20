@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 tokio = { version = "1.52.3", features = ["full"] }
+loom = "0.7"
 
 [build]
 rustflags = ["-A", "warning"]
