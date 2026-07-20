@@ -2,8 +2,9 @@
 use std::{
     ops::Deref,
     ptr::{NonNull, drop_in_place},
-    sync::atomic::{AtomicUsize, Ordering::Relaxed},
 };
+
+use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
 struct ArcData<T> {
     value: T,
@@ -32,7 +33,7 @@ impl <T> Drop for Arc<T> {
         self.dec();
 
         if self.get_count() == 0 {
-            unsafe { drop_in_place(self.data.as_ptr()) };
+            let _ = unsafe { Box::from_raw(self.data.as_ptr()) };
         }
     }
 }
@@ -93,6 +94,7 @@ unsafe impl<T> Sync for Arc<T> where T: Sync {}
 #[cfg(test)]
 mod test {
     use super::*;
+
     struct Test {
         value: &'static str,
     }

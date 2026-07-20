@@ -1,9 +1,10 @@
-use std::cell::UnsafeCell;
-use std::{
-    hint::{self},
-    ops::{Deref, DerefMut},
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed},
+use crate::sync::atomic::{
+    AtomicBool, AtomicUsize,
+    Ordering::{Acquire, Release},
+    spin_loop
 };
+use std::cell::UnsafeCell;
+use std::ops::{Deref, DerefMut};
 
 // How do we think about Send + Sync traits?
 pub struct RwLock<T> {
@@ -30,14 +31,19 @@ unsafe impl<T> Send for RwLock<T> where T: Send {}
 unsafe impl<T> Sync for RwLock<T> where T: Sync {}
 
 pub struct ReadGuard<'a, T> {
-    value: &'a T, // This needs something else...
-    counter: &'a AtomicUsize,
+    lock: &'a RwLock<T>,
 }
 
+unsafe impl<'a, T> Send for ReadGuard<'a, T> where T: Sync {}
+unsafe impl<'a, T> Sync for ReadGuard<'a, T> where T: Sync {}
+
 pub struct WriteGuard<'a, T> {
-    value: &'a mut T,
-    flag: &'a AtomicBool,
+    lock: &'a RwLock<T>,
 }
+
+// WriteGuard provides &mut T. So it will require T to be Send + Sync
+unsafe impl<'a, T> Sync for WriteGuard<'a, T> where T: Send + Sync {}
+unsafe impl<'a, T> Send for WriteGuard<'a, T> where T: Send + Sync {}
 
 impl<T> RwLock<T> {
     /// Create a new read-write lock for a value
@@ -54,42 +60,64 @@ impl<T> RwLock<T> {
 
     /// Get a read lock
     pub fn read(&self) -> ReadGuard<'_, T> {
-        while self.writing.load(Relaxed) {
-            hint::spin_loop();
+        loop {
+            // 1. Wait until we see that there is nothing writing
+            while self.writing.load(Acquire) {
+                spin_loop();
+            }
+
+            // 2. Increment the number of readers to signal to
+            // Anything that is trying to read that there are readers
+            self.readers.fetch_add(1, Acquire);
+
+            // 3. If no writers got in
+            // before we incremented readers then we leave the loop
+            if !self.writing.load(Acquire) {
+                break;
+            }
+
+            // 4. Otherwise backoff and try again.
+            self.readers.fetch_sub(1, Release);
         }
 
-        self.readers.fetch_add(1, Relaxed);
-
-        let ptr = unsafe { self.value.get().as_ref_unchecked() };
-        ReadGuard {
-            value: ptr,
-            counter: &self.readers,
-        }
+        ReadGuard { lock: self }
     }
 
     /// Get a write lock
     pub fn write(&self) -> WriteGuard<'_, T> {
         // If we don't already have a writer
         loop {
+            // 1. Are there any readers?
+            while self.readers.load(Acquire) > 0 {
+                spin_loop();
+            }
+
             match self
                 .writing
-                .compare_exchange_weak(false, true, Relaxed, Relaxed)
+                .compare_exchange_weak(false, true, Acquire, Acquire)
             {
-                Ok(_) => break,
+                // If there are no writers
+                Ok(_) => {
+                    // Check no readers picked up a lock
+                    if self.readers.load(Acquire) == 0 {
+                        break;
+                    } else {
+                        // A reader grabbed a lock, so we back off and try again.
+                        self.writing.store(false, Release);
+                        continue;
+                    }
+                }
+                // If there are any writers, then we continue
                 Err(_) => continue,
             }
         }
 
         // If we have no readers
-        while self.readers.load(Relaxed) > 0 {
-            hint::spin_loop();
+        while self.readers.load(Acquire) > 0 {
+            spin_loop();
         }
 
-        let ptr = unsafe { self.value.get().as_mut_unchecked() };
-        WriteGuard {
-            value: ptr,
-            flag: &self.writing,
-        }
+        WriteGuard { lock: self }
     }
 
     /// Try to obtain a read lock
@@ -109,7 +137,7 @@ impl<'a, T> Deref for ReadGuard<'a, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        self.value
+        unsafe { self.lock.value.get().as_ref_unchecked() }
     }
 }
 
@@ -117,13 +145,13 @@ impl<'a, T> Deref for WriteGuard<'a, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        self.value
+        unsafe { &*self.lock.value.get() }
     }
 }
 
 impl<'a, T> DerefMut for WriteGuard<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.value
+        unsafe { &mut *self.lock.value.get() }
     }
 }
 
@@ -131,7 +159,7 @@ impl<'a, T> Drop for WriteGuard<'a, T> {
     fn drop(&mut self) {
         // SAFETY: `self` is pinned till after dropped.
         // unsafe { Drop::pin_drop(std::pin::Pin::new_unchecked(self)) }
-        self.flag.store(false, Relaxed);
+        self.lock.writing.store(false, Release);
     }
 }
 
@@ -139,92 +167,162 @@ impl<'a, T> Drop for ReadGuard<'a, T> {
     fn drop(&mut self) {
         // SAFETY: `self` is pinned till after dropped.
         // unsafe { Drop::pin_drop(std::pin::Pin::new_unchecked(self)) }
-        self.counter.fetch_sub(1, Relaxed);
+        self.lock.readers.fetch_sub(1, Release);
     }
 }
 
-#[cfg(test)]
-mod test {
-    use std::{hint::spin_loop, sync::Arc, thread, time::Duration};
+#[cfg(all(test, not(feature = "shuttle")))]
+mod unit_test {
     use super::*;
+    use std::thread;
+    use std::sync::Arc;
+    use proptest::prelude::*;
 
     #[test]
-    fn multiple_writer_block() {
-        // Need to find a better way to do this.
-        let rwlock = Arc::new(RwLock::new(1));
-        let rw1 = rwlock.clone();
-        let t1 = thread::spawn(move || {
-            assert!(!rw1.writing.load(Relaxed));
-            let mut item = rw1.write();
-            assert!(rw1.writing.load(Relaxed) && item.flag.load(Relaxed));
-            thread::sleep(Duration::from_millis(100));
+    fn read_lock_resturns_value() {
+        let lock = RwLock::new(1);
+        let value = *lock.read();
 
-            *item += 1;
-        });
-
-        // This SHOULD aquire a write lock after the first thread.
-        let rw2 = rwlock.clone();
-        let t2 = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(50));
-            // Bit of a race condition here but this is what we want.
-            assert!(rw2.writing.load(Relaxed));
-            let mut item = rw2.write();
-            assert!(item.flag.load(Relaxed));
-            *item *= 2;
-        });
-
-        t1.join().unwrap();
-        t2.join().unwrap();
-
-        let value = *rwlock.read();
-
-        assert_eq!(value, 4);
+        assert_eq!(value, 1);
     }
 
     #[test]
-    fn multiple_writers_blocking() {
-        // This is an attempt to test some blocking action.
-        let mut handles = vec![];
-        let trigger = Arc::new(RwLock::new(false));
-        let values: Arc<RwLock<Vec<usize>>> = Arc::new(RwLock::new(vec![]));
-        for i in 0..20 {
-            let t = trigger.clone();
-            let v = values.clone();
-            let h = thread::spawn(move || {
-                // Should let us wait for everything to be created
-                while !(t.read().value) {
-                    spin_loop();
-                }
+    fn write_lock_returns_value() {
+        let lock = RwLock::new(1);
+        let value = *lock.write();
 
-                v.write().push(i);
-            });
+        assert_eq!(value, 1);
+    }
 
-            handles.push(h);
-        }
-
-        let v = values.clone();
-        let t = trigger.clone();
-        let whandle = thread::spawn(move || {
-            while !(t.read().value) {
-                spin_loop();
-            }
-
-            v.write().push(100);
-        });
-
-        handles.push(whandle);
+    #[test]
+    fn read_sees_written_value() {
+        let lock = RwLock::new(1);
 
         {
-            let mut x = trigger.write();
-            *x = true;
+            let mut g = lock.write();
+            (*g) = 10;
         }
 
-        for handle in handles {
-            handle.join().unwrap();
+        {
+            let r = lock.read();
+            assert_eq!(*r, 10);
         }
+    }
 
-        let v = values.read().value;
-        assert_eq!(values.read().len(), 21);
-        assert!(v.contains(&100));
+    #[test]
+    fn write_lock_waits_for_readers_to_drop() {
+        let lock = Arc::new(RwLock::new(0));
+        let reader = lock.read();
+
+        let thread_lock = lock.clone();
+        let w = thread::spawn(move || {
+            let mut writer = thread_lock.write();
+
+            *writer = 100;
+        });
+
+        assert_eq!(*reader, 0);
+        // NOTE: if the join happens here we are stuck waiting to drop the reader.
+        drop(reader);
+        w.join().unwrap();
+
+        let reader = lock.read();
+
+        assert_eq!(*reader, 100);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri")]
+    fn readers_waiting_for_writer() {
+        proptest!(|(readers in 1usize..=4)| {
+            let read_values: Arc<RwLock<Vec<usize>>> = Arc::new(RwLock::new(vec![]));
+            let lock = Arc::new(RwLock::new(0));
+            let mut writer = lock.write();
+
+            let mut handles = vec![];
+            for _ in 0..readers {
+                let input = lock.clone();
+                let out = read_values.clone();
+
+                let h = thread::spawn(move ||{
+                    let mut output = out.write();
+                    let value = input.read();
+
+                    output.push(*value);
+                });
+
+                handles.push(h);
+            }
+
+            assert_eq!(*writer, 0);
+            *writer = 2;
+            drop(writer);
+            for h in handles {
+                h.join().unwrap();
+            }
+
+            let reader = read_values.read();
+            for value in reader.iter() {
+                assert_eq!(*value, 2);
+            }
+        });
+
+
+    }
+
+    #[test]
+    fn drop_while_waiting() {
+        let lock = Arc::new(RwLock::new(0));
+        let reader = lock.read();
+
+        let thread_lock = lock.clone();
+        let w = thread::spawn(move || {
+            let mut writer = thread_lock.write();
+
+            *writer = 100;
+        });
+
+        assert_eq!(*reader, 0);
+
+    }
+}
+
+#[cfg(all(feature = "shuttle", test))]
+mod shuttle_test {
+
+    use super::*;
+    use shuttle::sync::Arc;
+
+    #[test]
+    fn loom_catches_writer_and_reader_overlap() {
+        shuttle::check_random(||{
+
+            let lock = Arc::new(RwLock::new(0));
+
+            let l1 = lock.clone();
+            let t1 = shuttle::thread::spawn(move || {
+                let mut guard = l1.write();
+                // Writer sees an even value and sets it to *guard + 1,
+                // which must always be odd while the write guard is held.
+                let value = *guard;
+                assert_eq!(value % 2, 0, "writer observed an odd value");
+                *guard = value + 1;
+                // We are adding twice here so there is an opportunity
+                // for the reader to read 1 if the locks are not working.
+                *guard += 1;
+                assert_eq!(value % 2, 0, "writer observed an odd value");
+            });
+
+            let t2 = shuttle::thread::spawn(move || {
+                let guard = lock.read();
+                // Reader must never see an odd value; only the writer
+                // produces odd values, and they must be exclusive.
+                let value = *guard;
+                assert_eq!(value % 2, 0, "reader observed an odd value");
+            });
+
+            t1.join().unwrap();
+            t2.join().unwrap();
+        }, 1000);
     }
 }
